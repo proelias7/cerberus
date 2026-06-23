@@ -1,26 +1,70 @@
-# Cerberus Load Balance
+# Cerberus
 
-## Objetivo
+Recurso modular para servidores FiveM (vRP). Centraliza sincronismo de payloads grandes, protecao anti-exploit em eventos server e rate-limit no client.
+
+## Modulos
+
+| Modulo | Ativacao | Descricao |
+|--------|----------|-----------|
+| **Load Balance** | sempre ativo | Envio balanceado server → client (`SendFullSync`, `SendDeltaSync`, etc.) |
+| **SafeEvent** | `config.modules.safeEvent` | Anti-exploit em eventos server (cooldown, posicao, ban) |
+| **SetCooldown** | sempre no client | Rate-limit local para menus, NUI e acoes repetitivas |
+| **Banned** | `config.modules.banned` | Cache e API de banimentos (`cerberus_bans`) |
+| **Analytics** | `config.modules.analytics` | Monitoramento de eventos, payloads e flood |
+| **Scope** | interno | Filtro espacial usado pelo load balance (`scopeRadius`) |
+
+## Instalacao
+
+```cfg
+ensure oxmysql
+ensure cerberus
+```
+
+Coloque o `cerberus` **antes** dos resources que dependem dos exports.
+
+Dependencias: `oxmysql`, `vrp` (Proxy/Tunnel para Passport, ban e notify).
+
+## Configuracao
+
+Arquivo: `config/config.lua`
+
+```lua
+config.modules = {
+    banned = false,
+    safeEvent = true,
+    analytics = true,
+}
+
+config.defaultTime = 30        -- intervalo padrao do SafeEvent (segundos)
+config.interPorDetect = 15     -- janela para contar suspeitas
+config.suspectCount = 4        -- suspeitas totais para auto-ban
+config.blockThreshold = 1      -- suspeitas por evento antes de bloquear
+config.logThreshold = 1        -- suspeitas por evento antes de log no console
+config.webhook = ""            -- webhook opcional
+config.BlackListEvents = { }   -- eventos que banem ao serem disparados
+```
+
+---
+
+## Load Balance
+
+### Objetivo
 
 O `cerberus` centraliza o envio de payloads grandes do servidor para os clients, evitando que cada resource implemente seu proprio sistema de chunk, fila, prioridade e remontagem.
 
-O objetivo e:
+Beneficios:
 
 - reduzir duplicacao de codigo
 - manter um padrao unico de sincronismo
 - diminuir risco de sobrecarga de rede
 - facilitar manutencao e tuning de performance
 
-## Fluxo
-
-O fluxo de sincronismo funciona assim:
+### Fluxo
 
 1. O script server chama um export do `cerberus`
 2. O `cerberus` decide como transportar o payload
 3. O client do `cerberus` recebe e monta os dados quando necessario
 4. O `cerberus` dispara um `TriggerEvent` local para o script consumidor
-
-Resumo:
 
 ```text
 server do resource -> cerberus server -> rede -> cerberus client -> TriggerEvent local -> client do resource
@@ -32,9 +76,7 @@ Importante:
 - quem controla chunking, fila, prioridade e latent event e o `cerberus`
 - o script consumidor recebe apenas o evento final
 
-## Como o transporte e escolhido
-
-O `cerberus` escolhe automaticamente a estrategia:
+### Como o transporte e escolhido
 
 - payload pequeno: envio direto
 - payload grande para um unico player: `TriggerLatentClientEvent`
@@ -45,124 +87,43 @@ Quando `coords` e `range` sao informados:
 - players dentro do raio recebem primeiro
 - players fora do raio continuam recebendo, mas com prioridade menor
 
-## Tipos de sincronismo
+### Exports
 
-### Full Sync
+| Export | Uso |
+|--------|-----|
+| `SendFullSync(targets, eventName, payload, options)` | Bootstrap / cache completo |
+| `SendDeltaSync(targets, eventName, payload, options)` | Update ou delete unitario |
+| `SendBalancedPayload(targets, eventName, payload, options)` | Controle manual do comportamento |
+| `SendAsyncClient(eventName, ...)` | Dispara `TriggerClientEvent` para todos com pacing de 20ms |
 
-Use para bootstrap ou cache completo.
+### Parametros
 
-Exemplos:
+**`targets`:** `source`, `-1` ou tabela de sources.
 
-- player entrou no servidor e precisa receber todos os baus
-- resource recarregou um cache inteiro
-- houve rebuild completo de um estado compartilhado
+**`eventName`:** evento final que o client consumidor recebe.
 
-Comportamento:
+**`payload`:** tabela serializavel em JSON.
 
-- pensado para payload grande
-- substitui envio pendente anterior da mesma chave
-- preserva o estado mais novo
+**`options`:**
 
-Export:
+| Campo | Descricao |
+|-------|-----------|
+| `key` | chave logica do job |
+| `coords` | coordenada para priorizacao espacial |
+| `range` | raio para separar players prioritarios |
+| `scopeRadius` | com `coords` e `-1`, so players dentro do raio recebem |
+| `replacePending` | substitui job pendente da mesma chave |
+| `syncKind` | semantica do job (logs) |
 
-```lua
-exports["cerberus"]:SendFullSync(targets, eventName, payload, options)
-```
+Diferenca entre `range` e `scopeRadius`:
 
-Alias:
+- `range`: prioriza players proximos, mas todos recebem
+- `scopeRadius`: filtra targets; apenas players dentro do raio recebem
 
-```lua
-exports["cerberus"]:SyncFull(targets, eventName, payload, options)
-```
-
-### Delta Sync
-
-Use para atualizar apenas uma parte do estado.
-
-Exemplos:
-
-- editou um bau
-- deletou um bau
-- atualizou uma unica rota
-- alterou uma unica entrada do cache
-
-Comportamento:
-
-- pensado para payload pequeno ou unitario
-- nao substitui pendencias por padrao
-- evita perder atualizacoes intermediarias
-
-Export:
+### Exemplo — Full Sync
 
 ```lua
-exports["cerberus"]:SendDeltaSync(targets, eventName, payload, options)
-```
-
-Alias:
-
-```lua
-exports["cerberus"]:SyncDelta(targets, eventName, payload, options)
-```
-
-## Export generico
-
-Tambem existe o export generico:
-
-```lua
-exports["cerberus"]:SendBalancedPayload(targets, eventName, payload, options)
-```
-
-Alias:
-
-```lua
-exports["cerberus"]:QueueBalancedPayload(targets, eventName, payload, options)
-```
-
-Use esse formato quando quiser controle manual do comportamento.
-
-## Parametros
-
-### `targets`
-
-Pode ser:
-
-- `source`
-- `-1` para todos os players conectados
-- tabela com varios `source`
-
-### `eventName`
-
-Evento final que o script client consumidor vai receber.
-
-### `payload`
-
-Tabela ou estrutura serializavel em JSON.
-
-### `options`
-
-Campos suportados:
-
-- `key`: chave logica do job
-- `coords`: coordenada para priorizacao espacial
-- `range`: raio para separar players prioritarios
-- `scopeRadius`: quando usado com `coords` e targets `-1`, filtra targets para apenas players dentro do raio usando o sistema de scope espacial. Players fora do raio nao recebem o evento. Util para eventos que so fazem sentido para players proximos (ex: modificacoes visuais de veiculos)
-- `replacePending`: define se deve substituir pendencia anterior
-- `syncKind`: usado para logs e semantica do job
-
-## Regras recomendadas
-
-- use `SendFullSync` para cache completo
-- use `SendDeltaSync` para update unitario
-- nao faca chunking manual dentro dos scripts consumidores
-- envie apenas dados que o client realmente precisa
-- prefira delta em vez de full sync sempre que possivel
-- use `coords` e `range` quando o dado for relevante por proximidade
-- use `scopeRadius` quando o evento so e relevante para players proximos
-
-## Exemplo de Full Sync
-
-```lua
-local ok, requestId = exports["cerberus"]:SendFullSync(
+exports["cerberus"]:SendFullSync(
     source,
     "chest:fullSync",
     chestCacheSanitized,
@@ -174,7 +135,7 @@ local ok, requestId = exports["cerberus"]:SendFullSync(
 )
 ```
 
-No client:
+Client:
 
 ```lua
 RegisterNetEvent("chest:fullSync")
@@ -184,133 +145,227 @@ AddEventHandler("chest:fullSync", function(payload)
 end)
 ```
 
-## Exemplo de Delta Sync
+### Exemplo — Delta Sync
 
 ```lua
-exports["cerberus"]:SendDeltaSync(
-    -1,
-    "chest:updateChest",
-    chestData
-)
+exports["cerberus"]:SendDeltaSync(-1, "chest:updateChest", chestData)
+
+exports["cerberus"]:SendDeltaSync(-1, "chest:deleteChest", { name = chestName })
 ```
 
-No client:
+### Exemplo — Scope (apenas players proximos)
 
 ```lua
-RegisterNetEvent("chest:updateChest")
-AddEventHandler("chest:updateChest", function(chestData)
-    allChests[chestData.name] = chestData
-    UpdateTargetZones(chestData.name)
-end)
+exports["cerberus"]:SendDeltaSync(-1, "meuResource:meuEvento", payload, {
+    coords = GetEntityCoords(vehicle),
+    scopeRadius = 200.0,
+    range = 100.0
+})
 ```
 
-## Caso de delete
+### Regras recomendadas
 
-Para delecao, o padrao recomendado e enviar um delta pequeno:
+- use `SendFullSync` para cache completo / bootstrap
+- use `SendDeltaSync` para update unitario
+- nao faca chunking manual nos scripts consumidores
+- envie apenas dados que o client realmente precisa
+- prefira delta em vez de full sync sempre que possivel
 
-```lua
-exports["cerberus"]:SendDeltaSync(
-    -1,
-    "chest:deleteChest",
-    { name = chestName }
-)
-```
-
-No client:
-
-```lua
-RegisterNetEvent("chest:deleteChest")
-AddEventHandler("chest:deleteChest", function(data)
-    allChests[data.name] = nil
-    CreateTargetZones()
-end)
-```
-
-## Logs
-
-O `cerberus` escreve logs no console quando um job:
-
-- inicia
-- termina
-
-Os logs mostram:
-
-- `request`
-- `sync`
-- `event`
-- `transport`
-- `targets`
-- `near`
-- `far`
-- `payloadBytes`
-- `elapsedMs`
-- `key`
-
-Exemplo:
+### Logs
 
 ```text
-[cerberus][loadbalance][start] request=123 sync=full event=chest:fullSync transport=chunk targets=80 near=12 far=68 payloadBytes=48120 key=inventory:chests:full
-[cerberus][loadbalance][finish] request=123 sync=full event=chest:fullSync transport=chunk targets=80 delivered=80 payloadBytes=48120 elapsedMs=1732 key=inventory:chests:full
+[cerberus][loadbalance][start] request=123 sync=full event=chest:fullSync transport=chunk targets=80 ...
+[cerberus][loadbalance][finish] request=123 sync=full event=chest:fullSync transport=chunk targets=80 delivered=80 ...
 ```
 
-Observacao:
+O log de `finish` significa que o servidor terminou de despachar o job — nao confirma aplicacao no script consumidor.
 
-- o log de `finish` significa que o servidor terminou de despachar o job
-- ele nao confirma aplicacao final no script consumidor
+---
 
-## Cenarios comuns
+## SafeEvent (server)
 
-### Player entrou depois do servidor iniciado
+Requer `config.modules.safeEvent = true`.
 
-Use `SendFullSync(source, ...)`.
-
-Esse e o caso de bootstrap de estado para um unico player.
-
-### Editou apenas um item do cache
-
-Use `SendDeltaSync(-1, ...)`.
-
-Esse e o caso ideal para evitar reenviar o cache inteiro.
-
-### Atualizacao relevante por proximidade
-
-Use `coords` e `range`.
-
-Players proximos recebem primeiro. Os demais recebem depois.
-
-### Evento exclusivo para players proximos (scope)
-
-Use `coords`, `scopeRadius` e targets `-1`.
-
-Players fora do raio nao recebem o evento. Exemplo:
+Protege eventos que dao vantagem (dinheiro, item, XP, veiculo, bypass). Retorna `true` = **bloqueado**, `false` = permitido.
 
 ```lua
-local coords = GetEntityCoords(vehicle)
-exports["cerberus"]:SendDeltaSync(
-    -1,
-    "meuResource:meuEvento",
-    payload,
-    {
-        coords = coords,
-        scopeRadius = 200.0,
-        range = 100.0
-    }
-)
+exports["cerberus"]:SafeEvent(source, eventName, options)
 ```
 
-Diferenca entre `range` e `scopeRadius`:
+### Opcoes
 
-- `range`: prioriza players proximos, mas todos recebem
-- `scopeRadius`: filtra targets, apenas players dentro do raio recebem
+| Campo | Tipo | Padrao | Descricao |
+|-------|------|--------|-----------|
+| `time` | number | `config.defaultTime` | Intervalo minimo entre execucoes (segundos) |
+| `noBan` | boolean | `false` | Se `true`, nao aplica auto-ban |
+| `position` | boolean | `false` | Verifica distancia entre acoes |
+| `positionDist` | number | `100` | Distancia minima em metros quando `position=true` |
+| `notification` | boolean | `false` | Notifica o player ao bloquear |
+| `blockThreshold` | number | `config.blockThreshold` | Suspeitas por evento antes de bloquear |
+| `logThreshold` | number | `config.logThreshold` | Suspeitas por evento antes de log no console |
+| `silentLog` | boolean | `false` | Registra internamente sem print |
+| `interPorDetect` | number | `config.interPorDetect` | Janela para contar suspeitas |
+| `suspectCount` | number | `config.suspectCount` | Suspeitas totais para auto-ban |
+| `data` | any | `nil` | Dado extra para logs |
 
-Podem ser usados juntos: `scopeRadius` filtra quem recebe, `range` prioriza a ordem de entrega entre os que recebem.
+### Exemplo — evento de vantagem
 
-## O que evitar
+```lua
+RegisterServerEvent("shop:buy")
+AddEventHandler("shop:buy", function(itemId)
+    local source = source
+    if not source then return end
 
-- criar chunking manual em cada script
-- usar full sync para toda alteracao pequena
-- reenviar cache completo quando apenas uma entrada mudou
-- tratar o client consumidor como responsavel por logica de balanceamento
+    if exports["cerberus"]:SafeEvent(source, "shop:buy", {
+        time = 10,
+        position = true,
+        positionDist = 2
+    }) then
+        return
+    end
+
+    -- validacao server + conceder recompensa
+end)
+```
+
+### Exemplo — flood / evento sensivel a DB
+
+```lua
+if exports["cerberus"]:SafeEvent(source, "requestInventory", {
+    time = 2,
+    noBan = true,
+    notification = true,
+    blockThreshold = 3
+}) then
+    return
+end
+```
+
+### BlackListEvents
+
+Eventos listados em `config.BlackListEvents` aplicam ban automatico ao serem disparados.
+
+### Debug
+
+Console do servidor:
+
+```text
+debugexploit
+```
+
+Alterna logs detalhados do SafeEvent.
+
+> **Regra:** `SafeEvent` complementa — nao substitui — validacao server (permissao, distancia, item, preco).
+
+---
+
+## SetCooldown (client)
+
+Rate-limit no **client**. Tempo em **milissegundos**. Retorna `true` = **bloqueado**.
+
+```lua
+exports["cerberus"]:SetCooldown(name, time, hits)
+```
+
+| Parametro | Descricao |
+|-----------|-----------|
+| `name` | Identificador unico da acao |
+| `time` | Duracao do cooldown em ms |
+| `hits` | (opcional) Numero de tentativas antes de bloquear por `time` ms |
+
+### Exemplos
+
+```lua
+-- Por tempo
+if exports["cerberus"]:SetCooldown("open:inventory", 3000) then
+    return
+end
+
+-- Por tentativas: 3 hits, depois bloqueia por 5s
+if exports["cerberus"]:SetCooldown("use:item", 5000, 3) then
+    return
+end
+```
+
+```lua
+RegisterNUICallback("buy", function(data, cb)
+    if exports["cerberus"]:SetCooldown("shop:buy", 2000) then
+        cb("blocked")
+        return
+    end
+    TriggerServerEvent("shop:buy", data.item)
+    cb("ok")
+end)
+```
+
+Ao bloquear, exibe notify automatico: `Aguarde X segundos para executar a acao novamente.`
+
+---
+
+## SafeEvent vs SetCooldown
+
+| | SafeEvent | SetCooldown |
+|---|-----------|-------------|
+| Lado | Server | Client |
+| Proposito | Anti-exploit | Rate-limit de spam |
+| Ao detectar | Bloqueia e/ou bane | Bloqueia temporariamente |
+| Unidade de tempo | Segundos | Milissegundos |
+
+| Situacao | Use |
+|----------|-----|
+| Evento server com dinheiro/item/XP | `SafeEvent` |
+| Abrir menu / NUI / spam de item | `SetCooldown` |
+| Sync grande server → client | `SendFullSync` / `SendDeltaSync` |
+
+---
+
+## Banned (opcional)
+
+Requer `config.modules.banned = true` e tabelas `cerberus_bans` / `cerberus_identys` (criadas automaticamente).
+
+| Export | Descricao |
+|--------|-----------|
+| `Banned(license, returnID?, source?)` | Verifica se license/identificadores estao banidos |
+| `BanTokens(license, banned, reason, time, source)` | Aplica ou remove ban |
+| `LoadCacheBanned()` | Recarrega cache de bans |
+| `SourceLicense(license)` | Source associado a license |
+| `GetLicenseBanID(license)` | ID do ban |
+| `GetIdentys(license, source)` / `SetIdentys(license, source)` | Identificadores do player |
+
+O SafeEvent usa `SetBan` internamente quando `noBan = false`.
+
+---
+
+## Analytics (opcional)
+
+Requer `config.modules.analytics = true`.
+
+Monitora automaticamente:
+
+- tamanho de payloads (warning/critical)
+- flood de eventos por source
+- alteracoes de StateBag
+
+Export manual para instrumentacao:
+
+```lua
+exports["cerberus"]:hit(resourceName, eventName, isGlobal, payloadSize)
+```
+
+---
+
+## Scope (interno)
+
+Exports usados pelo load balance e por outros modulos:
+
+```lua
+exports["cerberus"]:PlayersScope(coords, radius)
+exports["cerberus"]:PlayersScopeCoords(coords, radius)
+```
+
+Retornam lista de `source` dentro do raio.
+
+---
 
 ## Recomendacao de arquitetura
 
@@ -322,9 +377,13 @@ Scripts como `inventory`, `routes`, `nation` e similares devem:
 
 O `cerberus` deve:
 
-- controlar transporte
-- controlar fila
-- controlar prioridade
-- montar payload fragmentado no client
-- disparar o evento local final
+- controlar transporte, fila e prioridade (load balance)
+- proteger eventos de vantagem (`SafeEvent`)
+- limitar spam no client (`SetCooldown`)
 
+### O que evitar
+
+- chunking manual em cada script
+- full sync para toda alteracao pequena
+- confiar apenas no client para validacao de vantagem
+- reenviar cache completo quando apenas uma entrada mudou
